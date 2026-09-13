@@ -5,11 +5,13 @@ use cortex_m::peripheral::NVIC;
 use defmt_rtt as _;
 use efm32xg_hal::{
     cmu::{Cmu, HfClockSource, LfClockSource},
+    dma::Dma,
     gpio::{dynamic::DynamicPin, efemb::AsyncInputPin},
     pac::Interrupt,
+    peripherals::Usart0,
     prelude::*,
     timer_le::efemb::Ticker,
-    usart::spi::{BitOrder, Config, SpiBlocking, SpiParts},
+    usart::spi::{BitOrder, Config, SpiParts},
 };
 use embassy_executor::Spawner;
 use embassy_time::Timer;
@@ -23,18 +25,15 @@ async fn main(spawner: Spawner) {
 
     // Initialize clocks
     let _clocks = Cmu::new(p.Cmu)
-        .with_hf_clk(
-            HfClockSource::HfRco,
-            efm32xg_hal::cmu::HfClockPrescaler::Div1,
-        )
+        .with_hf_clk(HfClockSource::HfRco, HfClockPrescaler::Div1)
         .with_lfa_clk(LfClockSource::LfRco)
         .freeze();
 
     // Initialize embassy time driver
     Ticker::init();
 
-    // Initialize GPIO
     let gpio = Gpio::new(p.Gpio);
+    let dma = Dma::init(p.Ldma);
 
     // Enable NVIC for GPIO interrupts
     unsafe {
@@ -42,41 +41,33 @@ async fn main(spawner: Spawner) {
         NVIC::unmask(Interrupt::GPIO_ODD);
     }
 
-    // ---- LED 0 (PF4) and Button 0 (PF6) ----
+    // ---- LED 0 and Button 0 ----
     let led0 = gpio.pf4.into_mode::<OutPp>().into_dynamic_pin();
     let btn0 = gpio
         .pf6
         .into_mode::<InFloat>()
         .into_async_input(gpio.exti4ctrl);
 
-    // ---- LED 1 (PF5) and Button 1 (PF7) ----
+    // ---- LED 1 and Button 1 ----
     let led1 = gpio.pf5.into_mode::<OutPpAlt>().into_dynamic_pin();
     let btn1 = gpio
         .pf7
         .into_mode::<InFilt>()
-        .into_dynamic_pin()
-        .try_into_async_input(gpio.exti5ctrl)
-        .unwrap();
+        .into_async_input(gpio.exti5ctrl);
 
-    // ---- SPI Setup (USART0 in loopback mode for testing) ----
-    // Using PC6 (TX), PC7 (RX), PC8 (CLK) - same as spi.rs example
+    // ---- SPI Setup ----
     let clk = gpio.pc8.into_mode::<OutPp>();
     let tx = gpio.pc6.into_mode::<OutPp>();
     let rx = gpio.pc7.into_mode::<InFilt>();
-
-    // Create SPI in loopback mode so TX connects to RX internally
     let spi_parts = SpiParts::new(p.Usart0, clk, tx, rx);
-    let spi_config = Config::new(MODE_2, 0) // 0 divider = max baudrate
-        .with_loopback(true) // Enable loopback for testing
+    let spi_config = Config::new(MODE_2, 0)
+        .with_loopback(true)
         .with_bit_order(BitOrder::MsbFirst);
-    let spi: SpiBlocking<'static, efm32xg_hal::peripherals::Usart0> =
-        SpiBlocking::new(spi_parts, &spi_config);
+    let spi: Spi<'static, Usart0> = Spi::new(spi_parts, &spi_config, dma.ch1, dma.ch0);
 
-    // Spawn button tasks
+    // Spawn tasks
     spawner.spawn(button_led_task(btn0, led0).expect("Could not spawn Task 0"));
     spawner.spawn(button_led_task(btn1, led1).expect("Could not spawn Task 1"));
-
-    // Spawn SPI demo task
     spawner.spawn(spi_demo_task(spi).expect("Could not spawn SPI task"));
 
     defmt::info!("EFM32XG Demo started!");
@@ -106,7 +97,7 @@ async fn button_led_task(mut btn: AsyncInputPin, mut led: DynamicPin) {
 }
 
 #[embassy_executor::task]
-async fn spi_demo_task(spi: SpiBlocking<'static, efm32xg_hal::peripherals::Usart0>) {
+async fn spi_demo_task(spi: Spi<'static, Usart0>) {
     // We need to make the SPI mutable for the transfer
     // But we can't make it mutable in the task signature because task args must be 'static
     // So we'll use a local mutable reference
@@ -121,7 +112,7 @@ async fn spi_demo_task(spi: SpiBlocking<'static, efm32xg_hal::peripherals::Usart
         defmt::info!("Starting SPI loopback test...");
 
         // Transfer data in loopback mode (TX should be received back)
-        match spi.transfer(&mut rx_buf, &tx_buf) {
+        match spi.transfer_async(&mut rx_buf, &tx_buf).await {
             Ok(_) => {
                 // Check if we got back what we sent
                 if rx_buf == test_data {
