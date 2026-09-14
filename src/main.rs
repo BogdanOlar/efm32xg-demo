@@ -6,17 +6,18 @@ use defmt_rtt as _;
 use efm32xg_hal::{
     cmu::{Cmu, HfClockSource, LfClockSource},
     dma::Dma,
-    gpio::{dynamic::DynamicPin, efemb::AsyncInputPin},
+    gpio::{dynamic::DynamicPin, efemb::AsyncInputPin, OutPp, Pin},
     pac::Interrupt,
     peripherals::Usart0,
     prelude::*,
     timer_le::efemb::Ticker,
     usart::spi::{BitOrder, Config, SpiParts},
 };
-use embassy_executor::Spawner;
+use embassy_executor::{task, Spawner};
 use embassy_time::Timer;
-use embedded_hal::spi::MODE_2;
+use embedded_hal::spi::MODE_0;
 use embedded_hal_async::digital::Wait;
+use ls013b7dh03::Ls013b7dh03;
 use panic_probe as _;
 
 #[embassy_executor::main]
@@ -56,26 +57,33 @@ async fn main(spawner: Spawner) {
         .into_async_input(gpio.exti5ctrl);
 
     // ---- SPI Setup ----
-    let clk = gpio.pc8.into_mode::<OutPp>();
-    let tx = gpio.pc6.into_mode::<OutPp>();
-    let rx = gpio.pc7.into_mode::<InFilt>();
-    let spi_parts = SpiParts::new(p.Usart0, clk, tx, rx);
-    let spi_config = Config::new(MODE_2, 0)
-        .with_loopback(true)
-        .with_bit_order(BitOrder::MsbFirst);
-    let spi: Spi<'static, Usart0> = Spi::new(spi_parts, &spi_config, dma.ch1, dma.ch0);
+    let spi: Spi<'static, Usart0> = Spi::new(
+        SpiParts::new(
+            p.Usart0,
+            gpio.pc8.into_mode::<OutPp>(),
+            gpio.pc6.into_mode::<OutPp>(),
+            gpio.pc7.into_mode::<InFilt>(),
+        ),
+        &Config::new(MODE_0, 32).with_bit_order(BitOrder::MsbFirst),
+        dma.ch1,
+        dma.ch0,
+    );
+    let cs = gpio.pd14.into_mode::<OutPp>();
+    let disp_com = gpio.pd13.into_mode::<OutPp>();
+    // Let this App take control of display (this is a `UG154: EFM32 Pearl Gecko Starter Kit` paticularity)
+    let _ = gpio.pd15.into_mode::<OutPp>().set_high();
 
     // Spawn tasks
     spawner.spawn(button_led_task(btn0, led0).expect("Could not spawn Task 0"));
     spawner.spawn(button_led_task(btn1, led1).expect("Could not spawn Task 1"));
-    spawner.spawn(spi_demo_task(spi).expect("Could not spawn SPI task"));
+    spawner.spawn(spi_demo_task(spi, cs, disp_com).expect("Could not spawn SPI task"));
 
     defmt::info!("EFM32XG Demo started!");
     defmt::info!("Press BTN0 (PF6) or BTN1 (PF7) to toggle LEDs");
     defmt::info!("SPI loopback test running...");
 }
 
-#[embassy_executor::task(pool_size = 2)]
+#[task(pool_size = 2)]
 async fn button_led_task(mut btn: AsyncInputPin, mut led: DynamicPin) {
     loop {
         // Wait for button press (active low)
@@ -96,37 +104,42 @@ async fn button_led_task(mut btn: AsyncInputPin, mut led: DynamicPin) {
     }
 }
 
-#[embassy_executor::task]
-async fn spi_demo_task(spi: Spi<'static, Usart0>) {
-    // We need to make the SPI mutable for the transfer
-    // But we can't make it mutable in the task signature because task args must be 'static
-    // So we'll use a local mutable reference
-    let mut spi = spi;
-
+#[task]
+async fn spi_demo_task(
+    spi: Spi<'static, Usart0>,
+    cs: Pin<'D', 14, OutPp>,
+    disp_com: Pin<'D', 13, OutPp>,
+) {
     // Test data for SPI loopback
-    let test_data = [0x55, 0xAA, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06];
-    let tx_buf = test_data;
-    let mut rx_buf = [0u8; 8];
+    let mut buffer = [0u8; ls013b7dh03::BUF_SIZE];
+    let mut disp = Ls013b7dh03::new(spi, cs, disp_com, &mut buffer);
+
+    defmt::info!("Starting SPI loopback test...");
 
     loop {
-        defmt::info!("Starting SPI loopback test...");
-
-        // Transfer data in loopback mode (TX should be received back)
-        match spi.transfer_async(&mut rx_buf, &tx_buf).await {
-            Ok(_) => {
-                // Check if we got back what we sent
-                if rx_buf == test_data {
-                    defmt::info!("SPI loopback test PASSED! Received: {:02X}", rx_buf);
-                } else {
-                    defmt::error!("SPI loopback test FAILED!");
-                    defmt::error!("Sent:    {:02X}", tx_buf);
-                    defmt::error!("Received: {:02X}", rx_buf);
-                }
-            }
-            Err(e) => {
-                defmt::error!("SPI transfer error: {:?}", e);
+        for y in 0..ls013b7dh03::HEIGHT as u8 {
+            for x in 0..ls013b7dh03::WIDTH as u8 {
+                let write_ret = disp.write(x, y, true);
+                assert!(write_ret.is_ok());
             }
         }
+
+        // Update the display
+        disp.flush();
+
+        // Wait before next test
+        Timer::after_secs(1).await;
+
+        for y in 0..ls013b7dh03::HEIGHT as u8 {
+            for x in 0..ls013b7dh03::WIDTH as u8 {
+                let write_ret = disp.write(x, y, false);
+
+                assert!(write_ret.is_ok());
+            }
+        }
+
+        // Update the display
+        disp.flush();
 
         // Wait before next test
         Timer::after_secs(1).await;

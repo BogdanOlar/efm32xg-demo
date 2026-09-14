@@ -28,6 +28,8 @@ cortex-m-rt = "0.7.5"
 embedded-hal = { version = "1.0" }
 embedded-hal-async = { version = "1.0" }
 
+ls013b7dh03 = { path = "../ls013b7dh03", features = ["embedded_graphics"] }
+
 [features]
 default = ["defmt"]
 defmt = [
