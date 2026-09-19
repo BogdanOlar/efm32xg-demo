@@ -29,6 +29,7 @@ embedded-hal = { version = "1.0" }
 embedded-hal-async = { version = "1.0" }
 
 embedded-graphics = { version = "0.8", features = ["defmt"]}
+heapless = { version = "0.9" }
 
 [features]
 default = ["defmt"]

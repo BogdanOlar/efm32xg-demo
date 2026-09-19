@@ -1,9 +1,11 @@
 #![no_main]
 #![no_std]
 
+mod display;
+
 use crate::display::ls013b7dh03::DisplayFrame;
 use cortex_m::peripheral::NVIC;
-use defmt::info;
+use defmt::error;
 use defmt_rtt as _;
 use efm32xg_hal::{
     cmu::{Cmu, HfClockSource, LfClockSource},
@@ -32,9 +34,8 @@ use embedded_graphics::{
 };
 use embedded_hal::spi::MODE_0;
 use embedded_hal_async::digital::Wait;
+use heapless::format;
 use panic_probe as _;
-
-mod display;
 
 const MAX_DISPLAY_FRAME_COUNT: usize = 2;
 static TO_SPI: Channel<ThreadModeRawMutex, DisplayFrame, MAX_DISPLAY_FRAME_COUNT> = Channel::new();
@@ -136,8 +137,8 @@ async fn main(spawner: Spawner) {
         .stroke_width(3)
         .stroke_alignment(StrokeAlignment::Inside)
         .build();
-    let character_style = MonoTextStyle::new(&FONT_6X10, BinaryColor::On);
-    let yoffset = 10;
+    let character_style = MonoTextStyle::new(&FONT_6X10, BinaryColor::Off);
+    let mut y_offset = 20;
 
     let sec_duration: f32 = 1000.0;
     let mut prev_frame_start = Instant::now();
@@ -146,13 +147,6 @@ async fn main(spawner: Spawner) {
         let frame_start = Instant::now();
         let frame_duration = (frame_start - prev_frame_start).as_millis() as f32;
         prev_frame_start = frame_start;
-
-        let fps = if frame_duration.is_normal() {
-            (((sec_duration / frame_duration) * 100.0) as u16) as f32 / 100.0
-        } else {
-            0.0
-        };
-        info!("{=f32} fps, {} ms", &fps, frame_duration);
 
         color = !color;
         frame.clear(BinaryColor::Off);
@@ -165,22 +159,36 @@ async fn main(spawner: Spawner) {
 
         // Draw a triangle.
         Triangle::new(
-            Point::new(16, 16 + yoffset),
-            Point::new(16 + 16, 16 + yoffset),
-            Point::new(16 + 8, yoffset),
+            Point::new(100, 16 + y_offset),
+            Point::new(100 + 16, 16 + y_offset),
+            Point::new(100 + 8, y_offset),
         )
         .into_styled(thin_stroke)
         .draw(&mut frame);
+        y_offset = if y_offset == 0 {
+            DisplayFrame::HEIGHT as i32
+        } else {
+            y_offset - 1
+        };
 
-        // Draw centered text.
-        let text = "embedded-graphics";
-        Text::with_alignment(
-            text,
-            frame.bounding_box().center() + Point::new(0, 15),
-            character_style,
-            Alignment::Center,
-        )
-        .draw(&mut frame);
+        // Draw FPS
+        let fps = if frame_duration.is_normal() {
+            sec_duration / frame_duration
+        } else {
+            0.0
+        };
+        if let Ok(fps_str) = format!(10; "{:.1} fps", fps) {
+            let fps_txt = Text::with_alignment(
+                fps_str.as_str(),
+                Point::new(0, 6),
+                character_style,
+                Alignment::Left,
+            );
+            frame.fill_solid(&fps_txt.bounding_box(), BinaryColor::On);
+            fps_txt.draw(&mut frame);
+        } else {
+            error!("Could not format fps {}", &fps);
+        }
 
         frames_out.send(frame).await;
     }
@@ -221,6 +229,12 @@ async fn spi_demo_task(
     _disp_com: Pin<'D', 13, OutPp>,
 ) {
     defmt::info!("Started SPI task...");
+
+    // Clear display
+    let spi_ret = spi
+        .transfer_async(&mut [], &[display::ls013b7dh03::LcdMode::Clear as u8])
+        .await;
+    assert!(spi_ret.is_ok());
 
     loop {
         let frame = frames_in.receive().await;
