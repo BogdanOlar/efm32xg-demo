@@ -167,7 +167,7 @@ async fn main(spawner: Spawner) {
             )
             .into_styled(thin_stroke)
             .draw(&mut frame);
-            y_offset = if y_offset == 0 {
+            y_offset = if y_offset <= -16 {
                 DisplayFrame::HEIGHT as i32
             } else {
                 y_offset - 1
