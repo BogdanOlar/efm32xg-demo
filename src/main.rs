@@ -14,11 +14,15 @@ use efm32xg_hal::{
     usart::spi::{BitOrder, Config, SpiParts},
 };
 use embassy_executor::{task, Spawner};
+use embassy_sync::{blocking_mutex::raw::ThreadModeRawMutex, channel::Channel};
 use embassy_time::Timer;
 use embedded_hal::spi::MODE_0;
 use embedded_hal_async::digital::Wait;
-use ls013b7dh03::Ls013b7dh03;
 use panic_probe as _;
+
+use crate::display::ls013b7dh03::DisplayFrame;
+
+mod display;
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
@@ -73,10 +77,12 @@ async fn main(spawner: Spawner) {
     // Let this App take control of display (this is a `UG154: EFM32 Pearl Gecko Starter Kit` paticularity)
     let _ = gpio.pd15.into_mode::<OutPp>().set_high();
 
+    let disp_frame = display::ls013b7dh03::take_display_frame();
+
     // Spawn tasks
     spawner.spawn(button_led_task(btn0, led0).expect("Could not spawn Task 0"));
     spawner.spawn(button_led_task(btn1, led1).expect("Could not spawn Task 1"));
-    spawner.spawn(spi_demo_task(spi, cs, disp_com).expect("Could not spawn SPI task"));
+    spawner.spawn(spi_demo_task(disp_frame, spi, cs, disp_com).expect("Could not spawn SPI task"));
 
     defmt::info!("EFM32XG Demo started!");
     defmt::info!("Press BTN0 (PF6) or BTN1 (PF7) to toggle LEDs");
@@ -106,40 +112,52 @@ async fn button_led_task(mut btn: AsyncInputPin, mut led: DynamicPin) {
 
 #[task]
 async fn spi_demo_task(
-    spi: Spi<'static, Usart0>,
-    cs: Pin<'D', 14, OutPp>,
-    disp_com: Pin<'D', 13, OutPp>,
+    mut frame: display::ls013b7dh03::DisplayFrame<'static>,
+    mut spi: Spi<'static, Usart0>,
+    mut cs: Pin<'D', 14, OutPp>,
+    _disp_com: Pin<'D', 13, OutPp>,
 ) {
-    // Test data for SPI loopback
-    let mut buffer = [0u8; ls013b7dh03::BUF_SIZE];
-    let mut disp = Ls013b7dh03::new(spi, cs, disp_com, &mut buffer);
-
     defmt::info!("Starting SPI loopback test...");
 
+    // let mut buffer: [u8; display::Ls013b7dh03::BUF_SIZE] = [0; _];
+    // let mut frame = DisplayFrame::new(&mut buffer);
+    // let mut frame = display::Ls013b7dh03::take_display_frame();
+
+    let mut color = false;
+
     loop {
-        for y in 0..ls013b7dh03::HEIGHT as u8 {
-            for x in 0..ls013b7dh03::WIDTH as u8 {
-                let write_ret = disp.write(x, y, true);
-                assert!(write_ret.is_ok());
+        color = !color;
+
+        for y in 0..frame.height() as u8 {
+            for x in 0..frame.width() as u8 {
+                frame.write(x, y, color);
             }
         }
 
         // Update the display
-        disp.flush();
+        {
+            // Assert CS
+            let _ = cs.set_high();
 
-        // Wait before next test
-        Timer::after_secs(1).await;
+            // Write update command
+            let spi_ret = spi
+                .transfer_async(&mut [], &[display::ls013b7dh03::LcdMode::Update as u8])
+                .await;
+            assert!(spi_ret.is_ok());
 
-        for y in 0..ls013b7dh03::HEIGHT as u8 {
-            for x in 0..ls013b7dh03::WIDTH as u8 {
-                let write_ret = disp.write(x, y, false);
+            // Write buffer
+            let spi_ret = spi.transfer_async(&mut [], frame.buffer()).await;
+            assert!(spi_ret.is_ok());
 
-                assert!(write_ret.is_ok());
-            }
+            // Write filler byte
+            let spi_ret = spi
+                .transfer_async(&mut [], &[display::ls013b7dh03::FILLER_BYTE])
+                .await;
+            assert!(spi_ret.is_ok());
+
+            // Deassert CS
+            let _ = cs.set_low();
         }
-
-        // Update the display
-        disp.flush();
 
         // Wait before next test
         Timer::after_secs(1).await;
