@@ -6,6 +6,14 @@ pub mod ls013b7dh03 {
         sync::atomic::{AtomicBool, Ordering},
     };
 
+    use embedded_graphics::{
+        draw_target::DrawTarget,
+        geometry::{Dimensions, Point, Size},
+        pixelcolor::BinaryColor,
+        primitives::Rectangle,
+        Pixel,
+    };
+
     static mut BUFFER: UnsafeCell<[u8; BUF_SIZE]> = UnsafeCell::new([0; _]);
     static BUFFER_AVAILABLE: AtomicBool = AtomicBool::new(true);
 
@@ -52,14 +60,17 @@ pub mod ls013b7dh03 {
         pub const HEIGHT: usize = 128;
 
         pub fn new(buffer: &'a mut [u8; BUF_SIZE]) -> Self {
-            Self { buffer }.reset()
+            let mut df = Self { buffer };
+            df.reset(false);
+            df
         }
 
         /// Initialize the internal buffer:
         /// - Write the on-wire address for each line, so that we only calculate them once
-        /// - Set all pixels to OFF state (which corresponds to bit `1`)
+        /// - Set all pixels to given state
         /// - Write the filler byte a the end of each line, so that we don't have to do it ever again
-        fn reset(self) -> Self {
+        fn reset(&mut self, is_pixel_on: bool) {
+            let color = if is_pixel_on { 0x00 } else { 0xFF };
             // Write addresses and filler bytes to buffer
             for (addr, sl) in self
                 .buffer
@@ -71,12 +82,10 @@ pub mod ls013b7dh03 {
 
                 sl[1..(LINE_TOTAL_BYTE_COUNT - 1)]
                     .iter_mut()
-                    .for_each(|b| *b = 0xFF);
+                    .for_each(|b| *b = color);
 
                 sl[LINE_TOTAL_BYTE_COUNT - 1] = FILLER_BYTE;
             }
-
-            self
         }
 
         pub fn width(&self) -> usize {
@@ -107,7 +116,7 @@ pub mod ls013b7dh03 {
         }
 
         /// Set the state of a pixel at the given coordinates
-        pub fn write(&mut self, x: u8, y: u8, is_pixel_on: bool) {
+        fn write(&mut self, x: u8, y: u8, is_pixel_on: bool) {
             let (index, bit_mask) = self.get_pixel_addr_unchecked(x, y);
 
             if ((self.buffer[index] & bit_mask) == 0) ^ is_pixel_on {
@@ -130,6 +139,51 @@ pub mod ls013b7dh03 {
             self.buffer[index] ^= bit_mask;
 
             (self.buffer[index] & bit_mask) == 0
+        }
+    }
+
+    impl<'a> Dimensions for DisplayFrame<'a> {
+        fn bounding_box(&self) -> Rectangle {
+            Rectangle {
+                top_left: Point { x: 0, y: 0 },
+                size: Size {
+                    width: DisplayFrame::WIDTH as u32,
+                    height: DisplayFrame::HEIGHT as u32,
+                },
+            }
+        }
+    }
+
+    impl<'a> DrawTarget for DisplayFrame<'a> {
+        type Color = BinaryColor;
+        type Error = core::convert::Infallible;
+
+        fn draw_iter<I>(&mut self, pixels: I) -> Result<(), Self::Error>
+        where
+            I: IntoIterator<Item = Pixel<Self::Color>>,
+        {
+            // Check if the pixel coordinates are out of bounds (negative or greater than
+            // (WIDTH,HEIGHT)). `DrawTarget` implementation are required to discard any out of bounds
+            // pixels without returning an error or causing a panic.
+            for (x, y, is_pixel_on) in pixels
+                .into_iter()
+                .filter(|p| {
+                    p.0.x >= 0
+                        && p.0.x < Self::WIDTH as i32
+                        && p.0.y >= 0
+                        && p.0.y < Self::HEIGHT as i32
+                })
+                .map(|p| (p.0.x as u8, p.0.y as u8, p.1.is_on()))
+            {
+                self.write(x, y, is_pixel_on);
+            }
+
+            Ok(())
+        }
+
+        fn clear(&mut self, color: Self::Color) -> Result<(), Self::Error> {
+            self.reset(color.is_on());
+            Ok(())
         }
     }
 }

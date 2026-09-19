@@ -21,6 +21,15 @@ use embassy_sync::{
     channel::{Channel, Receiver, Sender},
 };
 use embassy_time::{Instant, Timer};
+use embedded_graphics::{
+    draw_target::DrawTarget,
+    geometry::{Dimensions, Point},
+    mono_font::{ascii::FONT_6X10, MonoTextStyle},
+    pixelcolor::BinaryColor,
+    primitives::{Primitive, PrimitiveStyle, PrimitiveStyleBuilder, StrokeAlignment, Triangle},
+    text::{Alignment, Text},
+    Drawable,
+};
 use embedded_hal::spi::MODE_0;
 use embedded_hal_async::digital::Wait;
 use panic_probe as _;
@@ -120,6 +129,16 @@ async fn main(spawner: Spawner) {
     frames_out.send(disp_frame).await;
 
     let mut color = false;
+    // Create styles used by the drawing operations.
+    let thin_stroke = PrimitiveStyle::with_stroke(BinaryColor::On, 1);
+    let border_stroke = PrimitiveStyleBuilder::new()
+        .stroke_color(BinaryColor::On)
+        .stroke_width(3)
+        .stroke_alignment(StrokeAlignment::Inside)
+        .build();
+    let character_style = MonoTextStyle::new(&FONT_6X10, BinaryColor::On);
+    let yoffset = 10;
+
     let sec_duration: f32 = 1000.0;
     let mut prev_frame_start = Instant::now();
     loop {
@@ -136,12 +155,32 @@ async fn main(spawner: Spawner) {
         info!("{=f32} fps, {} ms", &fps, frame_duration);
 
         color = !color;
+        frame.clear(BinaryColor::Off);
 
-        for y in 0..frame.height() as u8 {
-            for x in 0..frame.width() as u8 {
-                frame.write(x, y, color);
-            }
-        }
+        // Draw a 3px wide outline around the display.
+        frame
+            .bounding_box()
+            .into_styled(border_stroke)
+            .draw(&mut frame);
+
+        // Draw a triangle.
+        Triangle::new(
+            Point::new(16, 16 + yoffset),
+            Point::new(16 + 16, 16 + yoffset),
+            Point::new(16 + 8, yoffset),
+        )
+        .into_styled(thin_stroke)
+        .draw(&mut frame);
+
+        // Draw centered text.
+        let text = "embedded-graphics";
+        Text::with_alignment(
+            text,
+            frame.bounding_box().center() + Point::new(0, 15),
+            character_style,
+            Alignment::Center,
+        )
+        .draw(&mut frame);
 
         frames_out.send(frame).await;
     }
