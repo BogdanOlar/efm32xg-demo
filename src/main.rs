@@ -16,7 +16,10 @@ use efm32xg_hal::{
     usart::spi::{BitOrder, Config, SpiParts},
 };
 use embassy_executor::{task, Spawner};
-use embassy_sync::{blocking_mutex::raw::ThreadModeRawMutex, channel::Channel};
+use embassy_sync::{
+    blocking_mutex::raw::ThreadModeRawMutex,
+    channel::{Channel, Receiver, Sender},
+};
 use embassy_time::{Instant, Timer};
 use embedded_hal::spi::MODE_0;
 use embedded_hal_async::digital::Wait;
@@ -28,6 +31,13 @@ const MAX_DISPLAY_FRAME_COUNT: usize = 2;
 static TO_SPI: Channel<ThreadModeRawMutex, DisplayFrame, MAX_DISPLAY_FRAME_COUNT> = Channel::new();
 static FROM_SPI: Channel<ThreadModeRawMutex, DisplayFrame, MAX_DISPLAY_FRAME_COUNT> =
     Channel::new();
+
+#[derive(Debug)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub enum ButtonId {
+    Btn0,
+    Btn1,
+}
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
@@ -51,45 +61,57 @@ async fn main(spawner: Spawner) {
         NVIC::unmask(Interrupt::GPIO_ODD);
     }
 
-    // ---- LED 0 and Button 0 ----
-    let led0 = gpio.pf4.into_mode::<OutPp>().into_dynamic_pin();
-    let btn0 = gpio
-        .pf6
-        .into_mode::<InFloat>()
-        .into_async_input(gpio.exti4ctrl);
-
-    // ---- LED 1 and Button 1 ----
-    let led1 = gpio.pf5.into_mode::<OutPpAlt>().into_dynamic_pin();
-    let btn1 = gpio
-        .pf7
-        .into_mode::<InFilt>()
-        .into_async_input(gpio.exti5ctrl);
-
-    // ---- SPI Setup ----
-    let spi: Spi<'static, Usart0> = Spi::new(
-        SpiParts::new(
-            p.Usart0,
-            gpio.pc8.into_mode::<OutPp>(),
-            gpio.pc6.into_mode::<OutPp>(),
-            gpio.pc7.into_mode::<InFilt>(),
-        ),
-        &Config::new(MODE_0, 16).with_bit_order(BitOrder::MsbFirst),
-        dma.ch1,
-        dma.ch0,
-    );
-    let cs = gpio.pd14.into_mode::<OutPp>();
-    let disp_com = gpio.pd13.into_mode::<OutPp>();
     // Let this App take control of display (this is a `UG154: EFM32 Pearl Gecko Starter Kit` paticularity)
     let _ = gpio.pd15.into_mode::<OutPp>().set_high();
 
-    // Spawn tasks
-    spawner.spawn(button_led_task(btn0, led0).expect("Could not spawn Task 0"));
-    spawner.spawn(button_led_task(btn1, led1).expect("Could not spawn Task 1"));
-    spawner.spawn(spi_demo_task(spi, cs, disp_com).expect("Could not spawn SPI task"));
+    // ---- LED 0 and Button 0 Task ----
+    spawner.spawn(
+        button_led_task(
+            ButtonId::Btn0,
+            gpio.pf6
+                .into_mode::<InFloat>()
+                .into_async_input(gpio.exti4ctrl),
+            gpio.pf4.into_mode::<OutPp>().into_dynamic_pin(),
+        )
+        .expect("Could not spawn Task 0"),
+    );
+
+    // ---- LED 1 and Button 1 Task ----
+    spawner.spawn(
+        button_led_task(
+            ButtonId::Btn1,
+            gpio.pf7
+                .into_mode::<InFilt>()
+                .into_async_input(gpio.exti5ctrl),
+            gpio.pf5.into_mode::<OutPpAlt>().into_dynamic_pin(),
+        )
+        .expect("Could not spawn Task 1"),
+    );
+
+    // ---- SPI Task ----
+    spawner.spawn(
+        spi_demo_task(
+            TO_SPI.receiver(),
+            FROM_SPI.sender(),
+            Spi::new(
+                SpiParts::new(
+                    p.Usart0,
+                    gpio.pc8.into_mode::<OutPp>(),
+                    gpio.pc6.into_mode::<OutPp>(),
+                    gpio.pc7.into_mode::<InFilt>(),
+                ),
+                &Config::new(MODE_0, 16).with_bit_order(BitOrder::MsbFirst),
+                dma.ch1,
+                dma.ch0,
+            ),
+            gpio.pd14.into_mode::<OutPp>(),
+            gpio.pd13.into_mode::<OutPp>(),
+        )
+        .expect("Could not spawn SPI task"),
+    );
 
     defmt::info!("EFM32XG Demo started!");
     defmt::info!("Press BTN0 (PF6) or BTN1 (PF7) to toggle LEDs");
-    defmt::info!("SPI loopback test running...");
 
     let frames_in = FROM_SPI.receiver();
     let frames_out = TO_SPI.sender();
@@ -126,12 +148,12 @@ async fn main(spawner: Spawner) {
 }
 
 #[task(pool_size = 2)]
-async fn button_led_task(mut btn: AsyncInputPin, mut led: DynamicPin) {
+async fn button_led_task(btn_id: ButtonId, mut btn: AsyncInputPin, mut led: DynamicPin) {
     loop {
         // Wait for button press (active low)
         let _ = btn.wait_for_low().await;
         let _ = led.set_high();
-        defmt::info!("Button pressed - LED ON");
+        defmt::info!("{} pressed - LED ON", &btn_id);
 
         // Small delay to debounce
         Timer::after_millis(50).await;
@@ -139,7 +161,7 @@ async fn button_led_task(mut btn: AsyncInputPin, mut led: DynamicPin) {
         // Wait for button release
         let _ = btn.wait_for_high().await;
         let _ = led.set_low();
-        defmt::info!("Button released - LED OFF");
+        defmt::info!("{} released - LED OFF", &btn_id);
 
         // Small delay to debounce
         Timer::after_millis(50).await;
@@ -148,14 +170,18 @@ async fn button_led_task(mut btn: AsyncInputPin, mut led: DynamicPin) {
 
 #[task]
 async fn spi_demo_task(
+    frames_in: Receiver<
+        'static,
+        ThreadModeRawMutex,
+        DisplayFrame<'static>,
+        MAX_DISPLAY_FRAME_COUNT,
+    >,
+    frames_out: Sender<'static, ThreadModeRawMutex, DisplayFrame<'static>, MAX_DISPLAY_FRAME_COUNT>,
     mut spi: Spi<'static, Usart0>,
     mut cs: Pin<'D', 14, OutPp>,
     _disp_com: Pin<'D', 13, OutPp>,
 ) {
     defmt::info!("Started SPI task...");
-
-    let frames_in = TO_SPI.receiver();
-    let frames_out = FROM_SPI.sender();
 
     loop {
         let frame = frames_in.receive().await;
