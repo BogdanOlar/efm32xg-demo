@@ -123,7 +123,7 @@ async fn main(spawner: Spawner) {
     defmt::info!("EFM32XG Demo started!");
     defmt::info!("Press BTN0 (PF6) or BTN1 (PF7) to toggle LEDs");
 
-    // ---- Display Loop ----
+    // ---- Display Task ----
     {
         let frames_in = FROM_SPI.receiver();
         let frames_out = TO_SPI.sender();
@@ -252,7 +252,7 @@ async fn spi_demo_task(
         assert!(spi_ret.is_ok());
 
         // Write buffer
-        let spi_ret = spi.transfer_async(&mut [], frame.buffer()).await;
+        let spi_ret = spi.transfer_async(&mut [], frame.as_bytes()).await;
         assert!(spi_ret.is_ok());
 
         // Write filler byte

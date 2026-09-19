@@ -88,16 +88,11 @@ pub mod ls013b7dh03 {
             }
         }
 
-        pub fn width(&self) -> usize {
-            Self::WIDTH
-        }
-
-        pub fn height(&self) -> usize {
-            Self::HEIGHT
-        }
-
-        pub fn buffer(&self) -> &[u8; 2304] {
-            self.buffer
+        /// Get the raw bytes of the display frame.
+        ///
+        /// These include the line address bytes that the LCD expects
+        pub fn as_bytes(&self) -> &[u8] {
+            self.buffer.as_slice()
         }
 
         /// Get the buffer index corresponding to a pixel coord, and its bitmask which shows which bit in the byte
