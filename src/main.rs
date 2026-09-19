@@ -1,7 +1,9 @@
 #![no_main]
 #![no_std]
 
+use crate::display::ls013b7dh03::DisplayFrame;
 use cortex_m::peripheral::NVIC;
+use defmt::info;
 use defmt_rtt as _;
 use efm32xg_hal::{
     cmu::{Cmu, HfClockSource, LfClockSource},
@@ -15,14 +17,17 @@ use efm32xg_hal::{
 };
 use embassy_executor::{task, Spawner};
 use embassy_sync::{blocking_mutex::raw::ThreadModeRawMutex, channel::Channel};
-use embassy_time::Timer;
+use embassy_time::{Instant, Timer};
 use embedded_hal::spi::MODE_0;
 use embedded_hal_async::digital::Wait;
 use panic_probe as _;
 
-use crate::display::ls013b7dh03::DisplayFrame;
-
 mod display;
+
+const MAX_DISPLAY_FRAME_COUNT: usize = 2;
+static TO_SPI: Channel<ThreadModeRawMutex, DisplayFrame, MAX_DISPLAY_FRAME_COUNT> = Channel::new();
+static FROM_SPI: Channel<ThreadModeRawMutex, DisplayFrame, MAX_DISPLAY_FRAME_COUNT> =
+    Channel::new();
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
@@ -30,7 +35,7 @@ async fn main(spawner: Spawner) {
 
     // Initialize clocks
     let _clocks = Cmu::new(p.Cmu)
-        .with_hf_clk(HfClockSource::HfRco, HfClockPrescaler::Div1)
+        .with_hf_clk(HfClockSource::HfXO(40_000_000), HfClockPrescaler::Div1)
         .with_lfa_clk(LfClockSource::LfRco)
         .freeze();
 
@@ -68,7 +73,7 @@ async fn main(spawner: Spawner) {
             gpio.pc6.into_mode::<OutPp>(),
             gpio.pc7.into_mode::<InFilt>(),
         ),
-        &Config::new(MODE_0, 32).with_bit_order(BitOrder::MsbFirst),
+        &Config::new(MODE_0, 16).with_bit_order(BitOrder::MsbFirst),
         dma.ch1,
         dma.ch0,
     );
@@ -77,16 +82,47 @@ async fn main(spawner: Spawner) {
     // Let this App take control of display (this is a `UG154: EFM32 Pearl Gecko Starter Kit` paticularity)
     let _ = gpio.pd15.into_mode::<OutPp>().set_high();
 
-    let disp_frame = display::ls013b7dh03::take_display_frame();
-
     // Spawn tasks
     spawner.spawn(button_led_task(btn0, led0).expect("Could not spawn Task 0"));
     spawner.spawn(button_led_task(btn1, led1).expect("Could not spawn Task 1"));
-    spawner.spawn(spi_demo_task(disp_frame, spi, cs, disp_com).expect("Could not spawn SPI task"));
+    spawner.spawn(spi_demo_task(spi, cs, disp_com).expect("Could not spawn SPI task"));
 
     defmt::info!("EFM32XG Demo started!");
     defmt::info!("Press BTN0 (PF6) or BTN1 (PF7) to toggle LEDs");
     defmt::info!("SPI loopback test running...");
+
+    let frames_in = FROM_SPI.receiver();
+    let frames_out = TO_SPI.sender();
+
+    let disp_frame = display::ls013b7dh03::take_display_frame();
+    frames_out.send(disp_frame).await;
+
+    let mut color = false;
+    let sec_duration: f32 = 1000.0;
+    let mut prev_frame_start = Instant::now();
+    loop {
+        let mut frame = frames_in.receive().await;
+        let frame_start = Instant::now();
+        let frame_duration = (frame_start - prev_frame_start).as_millis() as f32;
+        prev_frame_start = frame_start;
+
+        let fps = if frame_duration.is_normal() {
+            (((sec_duration / frame_duration) * 100.0) as u16) as f32 / 100.0
+        } else {
+            0.0
+        };
+        info!("{=f32} fps, {} ms", &fps, frame_duration);
+
+        color = !color;
+
+        for y in 0..frame.height() as u8 {
+            for x in 0..frame.width() as u8 {
+                frame.write(x, y, color);
+            }
+        }
+
+        frames_out.send(frame).await;
+    }
 }
 
 #[task(pool_size = 2)]
@@ -112,54 +148,40 @@ async fn button_led_task(mut btn: AsyncInputPin, mut led: DynamicPin) {
 
 #[task]
 async fn spi_demo_task(
-    mut frame: display::ls013b7dh03::DisplayFrame<'static>,
     mut spi: Spi<'static, Usart0>,
     mut cs: Pin<'D', 14, OutPp>,
     _disp_com: Pin<'D', 13, OutPp>,
 ) {
-    defmt::info!("Starting SPI loopback test...");
+    defmt::info!("Started SPI task...");
 
-    // let mut buffer: [u8; display::Ls013b7dh03::BUF_SIZE] = [0; _];
-    // let mut frame = DisplayFrame::new(&mut buffer);
-    // let mut frame = display::Ls013b7dh03::take_display_frame();
-
-    let mut color = false;
+    let frames_in = TO_SPI.receiver();
+    let frames_out = FROM_SPI.sender();
 
     loop {
-        color = !color;
+        let frame = frames_in.receive().await;
 
-        for y in 0..frame.height() as u8 {
-            for x in 0..frame.width() as u8 {
-                frame.write(x, y, color);
-            }
-        }
+        // Assert CS
+        let _ = cs.set_high();
 
-        // Update the display
-        {
-            // Assert CS
-            let _ = cs.set_high();
+        // Write update command
+        let spi_ret = spi
+            .transfer_async(&mut [], &[display::ls013b7dh03::LcdMode::Update as u8])
+            .await;
+        assert!(spi_ret.is_ok());
 
-            // Write update command
-            let spi_ret = spi
-                .transfer_async(&mut [], &[display::ls013b7dh03::LcdMode::Update as u8])
-                .await;
-            assert!(spi_ret.is_ok());
+        // Write buffer
+        let spi_ret = spi.transfer_async(&mut [], frame.buffer()).await;
+        assert!(spi_ret.is_ok());
 
-            // Write buffer
-            let spi_ret = spi.transfer_async(&mut [], frame.buffer()).await;
-            assert!(spi_ret.is_ok());
+        // Write filler byte
+        let spi_ret = spi
+            .transfer_async(&mut [], &[display::ls013b7dh03::FILLER_BYTE])
+            .await;
+        assert!(spi_ret.is_ok());
 
-            // Write filler byte
-            let spi_ret = spi
-                .transfer_async(&mut [], &[display::ls013b7dh03::FILLER_BYTE])
-                .await;
-            assert!(spi_ret.is_ok());
+        // Deassert CS
+        let _ = cs.set_low();
 
-            // Deassert CS
-            let _ = cs.set_low();
-        }
-
-        // Wait before next test
-        Timer::after_secs(1).await;
+        frames_out.send(frame).await;
     }
 }
