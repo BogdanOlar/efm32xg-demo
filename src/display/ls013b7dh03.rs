@@ -174,6 +174,7 @@ impl<'a> DrawTarget for DisplayFrame<'a, BUF_SIZE> {
             .map(|p| (p.0.x as u8, p.0.y as u8, p.1.is_on()))
         {
             self.write(x, y, is_pixel_on);
+            // self.flip(x, y);
         }
 
         Ok(())
@@ -193,8 +194,6 @@ pub async fn lcd_task(
     mut cs: Pin<'D', 14, OutPp>,
     _disp_com_inv: Pin<'D', 13, OutPp>,
 ) {
-    defmt::info!("Started SPI task...");
-
     // Clear display
     let spi_ret = spi.transfer_async(&mut [], &[LcdMode::Clear as u8]).await;
     assert!(spi_ret.is_ok());
