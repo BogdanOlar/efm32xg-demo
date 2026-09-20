@@ -165,16 +165,17 @@ impl<'a> DrawTarget for DisplayFrame<'a, BUF_SIZE> {
     where
         I: IntoIterator<Item = Pixel<Self::Color>>,
     {
+        const I_WIDTH: i32 = WIDTH as i32;
+        const I_HEIGHT: i32 = HEIGHT as i32;
+
         // Check if the pixel coordinates are out of bounds (negative or greater than
         // (WIDTH,HEIGHT)). `DrawTarget` implementation are required to discard any out of bounds
         // pixels without returning an error or causing a panic.
-        for (x, y, is_pixel_on) in pixels
-            .into_iter()
-            .filter(|p| p.0.x >= 0 && p.0.x < WIDTH as i32 && p.0.y >= 0 && p.0.y < HEIGHT as i32)
-            .map(|p| (p.0.x as u8, p.0.y as u8, p.1.is_on()))
-        {
-            self.write(x, y, is_pixel_on);
-            // self.flip(x, y);
+        for Pixel(coord, color) in pixels.into_iter().filter(|Pixel(coord, _)| {
+            coord.x >= 0 && coord.x < I_WIDTH && coord.y >= 0 && coord.y < I_HEIGHT
+        }) {
+            self.write(coord.x as u8, coord.y as u8, color.is_on());
+            // self.flip(coord.x as u8, coord.y as u8);
         }
 
         Ok(())
