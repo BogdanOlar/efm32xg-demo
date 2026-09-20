@@ -186,22 +186,17 @@ pub async fn lcd_task(
     loop {
         let frame = frames_in.receive().await;
 
-        // Assert CS
         let _ = cs.set_high();
 
-        // Write update command
         let spi_ret = spi.transfer_async(&mut [], &[LcdMode::Update as u8]).await;
         assert!(spi_ret.is_ok());
 
-        // Write buffer
         let spi_ret = spi.transfer_async(&mut [], frame.as_bytes()).await;
         assert!(spi_ret.is_ok());
 
-        // Write filler byte
         let spi_ret = spi.transfer_async(&mut [], &[FILLER_BYTE]).await;
         assert!(spi_ret.is_ok());
 
-        // Deassert CS
         let _ = cs.set_low();
 
         frames_out.send(frame).await;
