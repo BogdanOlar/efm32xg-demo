@@ -11,7 +11,7 @@ use embedded_graphics::{
     mono_font::{ascii::FONT_6X10, MonoTextStyle},
     pixelcolor::BinaryColor,
     primitives::{Primitive, PrimitiveStyle, PrimitiveStyleBuilder, StrokeAlignment, Triangle},
-    text::{Alignment, Text},
+    text::{Alignment, Baseline, Text, TextStyleBuilder},
     Drawable,
 };
 use heapless::format;
@@ -45,6 +45,10 @@ pub async fn display_task(frames_in: DisplayFrameChReceiver, frames_out: Display
         .stroke_alignment(StrokeAlignment::Inside)
         .build();
     let character_style = MonoTextStyle::new(&FONT_6X10, BinaryColor::Off);
+    let left_aligned = TextStyleBuilder::new()
+        .alignment(Alignment::Left)
+        .baseline(Baseline::Top)
+        .build();
     let mut y_offset = 20;
 
     let sec_duration: f32 = 1000.0;
@@ -85,11 +89,11 @@ pub async fn display_task(frames_in: DisplayFrameChReceiver, frames_out: Display
             0.0
         };
         if let Ok(fps_str) = format!(10; "{:.1} fps", fps) {
-            let fps_txt = Text::with_alignment(
+            let fps_txt = Text::with_text_style(
                 fps_str.as_str(),
-                Point::new(0, 6),
+                frame.bounding_box().top_left,
                 character_style,
-                Alignment::Left,
+                left_aligned,
             );
             frame.fill_solid(&fps_txt.bounding_box(), BinaryColor::On);
             fps_txt.draw(&mut frame);
