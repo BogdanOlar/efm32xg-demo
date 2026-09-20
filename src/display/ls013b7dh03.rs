@@ -184,7 +184,7 @@ pub async fn lcd_task(
     assert!(spi_ret.is_ok());
 
     loop {
-        let buffer = frames_in.receive().await;
+        let frame = frames_in.receive().await;
 
         // Assert CS
         let _ = cs.set_high();
@@ -194,7 +194,7 @@ pub async fn lcd_task(
         assert!(spi_ret.is_ok());
 
         // Write buffer
-        let spi_ret = spi.transfer_async(&mut [], buffer.as_bytes()).await;
+        let spi_ret = spi.transfer_async(&mut [], frame.as_bytes()).await;
         assert!(spi_ret.is_ok());
 
         // Write filler byte
@@ -204,7 +204,7 @@ pub async fn lcd_task(
         // Deassert CS
         let _ = cs.set_low();
 
-        frames_out.send(buffer).await;
+        frames_out.send(frame).await;
     }
 }
 
