@@ -3,7 +3,7 @@
 
 mod display;
 
-use crate::display::ls013b7dh03::DisplayFrame;
+use crate::display::DisplayFrame;
 use cortex_m::peripheral::NVIC;
 use defmt::error;
 use defmt_rtt as _;
@@ -37,10 +37,28 @@ use embedded_hal_async::digital::Wait;
 use heapless::format;
 use panic_probe as _;
 
-const MAX_DISPLAY_FRAME_COUNT: usize = 2;
-static TO_SPI: Channel<ThreadModeRawMutex, DisplayFrame, MAX_DISPLAY_FRAME_COUNT> = Channel::new();
-static FROM_SPI: Channel<ThreadModeRawMutex, DisplayFrame, MAX_DISPLAY_FRAME_COUNT> =
-    Channel::new();
+const MAX_DISPLAY_BUFFER_COUNT: usize = 2;
+
+type DisplayFrameCh = Channel<
+    ThreadModeRawMutex,
+    DisplayFrame<'static, { display::ls013b7dh03::BUF_SIZE }>,
+    MAX_DISPLAY_BUFFER_COUNT,
+>;
+type DisplayFrameChReceiver = Receiver<
+    'static,
+    ThreadModeRawMutex,
+    DisplayFrame<'static, { display::ls013b7dh03::BUF_SIZE }>,
+    MAX_DISPLAY_BUFFER_COUNT,
+>;
+type DisplayFrameChSender = Sender<
+    'static,
+    ThreadModeRawMutex,
+    DisplayFrame<'static, { display::ls013b7dh03::BUF_SIZE }>,
+    MAX_DISPLAY_BUFFER_COUNT,
+>;
+
+static TO_SPI: DisplayFrameCh = Channel::new();
+static FROM_SPI: DisplayFrameCh = Channel::new();
 
 #[derive(Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
@@ -98,9 +116,9 @@ async fn main(spawner: Spawner) {
         .expect("Could not spawn Task 1"),
     );
 
-    // ---- SPI Task ----
+    // ---- LCD SPI Task ----
     spawner.spawn(
-        spi_demo_task(
+        lcd_task(
             TO_SPI.receiver(),
             FROM_SPI.sender(),
             Spi::new(
@@ -128,9 +146,9 @@ async fn main(spawner: Spawner) {
         let frames_in = FROM_SPI.receiver();
         let frames_out = TO_SPI.sender();
 
-        frames_out
-            .send(display::ls013b7dh03::take_display_frame())
-            .await;
+        for f in display::ls013b7dh03::take_display_frames() {
+            frames_out.send(f.release()).await;
+        }
 
         // Create styles used by the drawing operations.
         let thin_stroke = PrimitiveStyle::with_stroke(BinaryColor::On, 1);
@@ -168,7 +186,7 @@ async fn main(spawner: Spawner) {
             .into_styled(thin_stroke)
             .draw(&mut frame);
             y_offset = if y_offset <= -16 {
-                DisplayFrame::HEIGHT as i32
+                display::ls013b7dh03::HEIGHT as i32
             } else {
                 y_offset - 1
             };
@@ -192,7 +210,7 @@ async fn main(spawner: Spawner) {
                 error!("Could not format fps {}", &fps);
             }
 
-            frames_out.send(frame).await;
+            frames_out.send(frame.release()).await;
         }
     }
 }
@@ -219,51 +237,13 @@ async fn button_led_task(btn_id: ButtonId, mut btn: AsyncInputPin, mut led: Dyna
 }
 
 #[task]
-async fn spi_demo_task(
-    frames_in: Receiver<
-        'static,
-        ThreadModeRawMutex,
-        DisplayFrame<'static>,
-        MAX_DISPLAY_FRAME_COUNT,
-    >,
-    frames_out: Sender<'static, ThreadModeRawMutex, DisplayFrame<'static>, MAX_DISPLAY_FRAME_COUNT>,
-    mut spi: Spi<'static, Usart0>,
-    mut cs: Pin<'D', 14, OutPp>,
-    _disp_com: Pin<'D', 13, OutPp>,
+async fn lcd_task(
+    frames_in: DisplayFrameChReceiver,
+    frames_out: DisplayFrameChSender,
+    spi: Spi<'static, Usart0>,
+    cs: Pin<'D', 14, OutPp>,
+    disp_com_inv: Pin<'D', 13, OutPp>,
 ) {
     defmt::info!("Started SPI task...");
-
-    // Clear display
-    let spi_ret = spi
-        .transfer_async(&mut [], &[display::ls013b7dh03::LcdMode::Clear as u8])
-        .await;
-    assert!(spi_ret.is_ok());
-
-    loop {
-        let frame = frames_in.receive().await;
-
-        // Assert CS
-        let _ = cs.set_high();
-
-        // Write update command
-        let spi_ret = spi
-            .transfer_async(&mut [], &[display::ls013b7dh03::LcdMode::Update as u8])
-            .await;
-        assert!(spi_ret.is_ok());
-
-        // Write buffer
-        let spi_ret = spi.transfer_async(&mut [], frame.as_bytes()).await;
-        assert!(spi_ret.is_ok());
-
-        // Write filler byte
-        let spi_ret = spi
-            .transfer_async(&mut [], &[display::ls013b7dh03::FILLER_BYTE])
-            .await;
-        assert!(spi_ret.is_ok());
-
-        // Deassert CS
-        let _ = cs.set_low();
-
-        frames_out.send(frame).await;
-    }
+    display::ls013b7dh03::lcd_task(frames_in, frames_out, spi, cs, disp_com_inv).await;
 }

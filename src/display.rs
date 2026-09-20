@@ -1,11 +1,33 @@
 //! Display
 
+pub struct DisplayFrame<'a, const N: usize> {
+    pub buffer: &'a mut [u8; N],
+}
+
+impl<'a, const N: usize> DisplayFrame<'a, N> {
+    pub fn new(buffer: &'a mut [u8; N]) -> Self {
+        Self { buffer }
+    }
+
+    /// Get the raw bytes of the display frame.
+    ///
+    /// These include the line address bytes that the LCD expects
+    pub fn as_bytes(&self) -> &[u8] {
+        self.buffer.as_slice()
+    }
+}
+
 pub mod ls013b7dh03 {
+    use crate::{display::DisplayFrame, DisplayFrameChReceiver, DisplayFrameChSender};
     use core::{
         cell::UnsafeCell,
         sync::atomic::{AtomicBool, Ordering},
     };
-
+    use efm32xg_hal::{
+        gpio::{OutPp, Pin},
+        peripherals::Usart0,
+        usart::spi::dma::Spi,
+    };
     use embedded_graphics::{
         draw_target::DrawTarget,
         geometry::{Dimensions, Point, Size},
@@ -13,63 +35,80 @@ pub mod ls013b7dh03 {
         primitives::Rectangle,
         Pixel,
     };
-
-    static mut BUFFER: UnsafeCell<[u8; BUF_SIZE]> = UnsafeCell::new([0; _]);
-    static BUFFER_AVAILABLE: AtomicBool = AtomicBool::new(true);
+    use embedded_hal::digital::OutputPin;
 
     /// The buffer size this driver needs
-    pub const BUF_SIZE: usize = DisplayFrame::HEIGHT * LINE_TOTAL_BYTE_COUNT;
-    /// Display filler byte
-    pub const FILLER_BYTE: u8 = 0xFF;
-
-    const LINE_WIDTH_BYTE_COUNT: usize = DisplayFrame::WIDTH / (u8::BITS as usize);
+    pub const BUF_SIZE: usize = HEIGHT * LINE_TOTAL_BYTE_COUNT;
+    /// The width, in pixels of the Ls013b7dh03 display
+    pub const WIDTH: usize = 128;
+    /// The height, in pixels of the Ls013b7dh03 display
+    pub const HEIGHT: usize = 128;
+    const LINE_WIDTH_BYTE_COUNT: usize = WIDTH / (u8::BITS as usize);
     const LINE_PADDING_BYTE_COUNT: usize = 1;
     const LINE_ADDRESS_BYTE_COUNT: usize = 1;
     const LINE_TOTAL_BYTE_COUNT: usize =
         LINE_ADDRESS_BYTE_COUNT + LINE_WIDTH_BYTE_COUNT + LINE_PADDING_BYTE_COUNT;
+    /// LCD line filler byte
+    const FILLER_BYTE: u8 = 0xFF;
+
+    static mut BUFFER_0: UnsafeCell<[u8; BUF_SIZE]> = UnsafeCell::new([0; _]);
+    static BUFFER_0_AVAILABLE: AtomicBool = AtomicBool::new(true);
+    static mut BUFFER_1: UnsafeCell<[u8; BUF_SIZE]> = UnsafeCell::new([0; _]);
+    static BUFFER_1_AVAILABLE: AtomicBool = AtomicBool::new(true);
 
     /// LCD Mode flags
     #[derive(Debug)]
     #[repr(u8)]
-    pub enum LcdMode {
+    enum LcdMode {
         Clear = 0x20,
         Update = 0x80,
     }
 
-    pub fn take_display_frame() -> DisplayFrame<'static> {
-        let available = BUFFER_AVAILABLE.swap(false, Ordering::Relaxed);
-        if available {
+    pub fn take_display_frames<'a>() -> [DisplayFrame<'a, BUF_SIZE>; 2] {
+        let b0 = if BUFFER_0_AVAILABLE.swap(false, Ordering::Relaxed) {
             // SAFETY: available can only be true once on one thread,
             // so there will only be at most one &mut reference
-            let buffer = unsafe { &mut *&raw mut BUFFER };
-            DisplayFrame::new(buffer.get_mut())
+            let buffer = unsafe { &mut *&raw mut BUFFER_0 };
+            buffer.get_mut()
         } else {
-            panic!("attempted to reuse LS013B7DH03_BUFFER");
+            panic!("attempted to reuse BUFFER_0");
+        };
+
+        let b1 = if BUFFER_1_AVAILABLE.swap(false, Ordering::Relaxed) {
+            // SAFETY: available can only be true once on one thread,
+            // so there will only be at most one &mut reference
+            let buffer = unsafe { &mut *&raw mut BUFFER_1 };
+            buffer.get_mut()
+        } else {
+            panic!("attempted to reuse BUFFER_1");
+        };
+
+        // Initialize the display buffers before returning
+        [
+            DisplayFrame::new(b0).with_init(),
+            DisplayFrame::new(b1).with_init(),
+        ]
+    }
+
+    impl<'a> DisplayFrame<'a, BUF_SIZE> {
+        /// Initialize the display frame bytes
+        pub fn with_init(mut self) -> Self {
+            self.init(false);
+            self
         }
-    }
 
-    pub struct DisplayFrame<'a> {
-        buffer: &'a mut [u8; BUF_SIZE],
-    }
-
-    impl<'a> DisplayFrame<'a> {
-        /// The width, in pixels of the Ls013b7dh03 display
-        pub const WIDTH: usize = 128;
-
-        /// The height, in pixels of the Ls013b7dh03 display
-        pub const HEIGHT: usize = 128;
-
-        pub fn new(buffer: &'a mut [u8; BUF_SIZE]) -> Self {
-            let mut df = Self { buffer };
-            df.reset(false);
-            df
+        /// Release the inner buffer reference
+        pub fn release(self) -> DisplayFrame<'a, BUF_SIZE> {
+            DisplayFrame {
+                buffer: self.buffer,
+            }
         }
 
         /// Initialize the internal buffer:
         /// - Write the on-wire address for each line, so that we only calculate them once
         /// - Set all pixels to given state
         /// - Write the filler byte a the end of each line, so that we don't have to do it ever again
-        fn reset(&mut self, is_pixel_on: bool) {
+        fn init(&mut self, is_pixel_on: bool) {
             let color = if is_pixel_on { 0x00 } else { 0xFF };
             // Write addresses and filler bytes to buffer
             for (addr, sl) in self
@@ -88,18 +127,11 @@ pub mod ls013b7dh03 {
             }
         }
 
-        /// Get the raw bytes of the display frame.
-        ///
-        /// These include the line address bytes that the LCD expects
-        pub fn as_bytes(&self) -> &[u8] {
-            self.buffer.as_slice()
-        }
-
         /// Get the buffer index corresponding to a pixel coord, and its bitmask which shows which bit in the byte
         /// represents the pixel.
         fn get_pixel_addr_unchecked(&self, x: u8, y: u8) -> (usize, u8) {
-            assert!((x as usize) < Self::WIDTH);
-            assert!((y as usize) < Self::HEIGHT);
+            assert!((x as usize) < WIDTH);
+            assert!((y as usize) < HEIGHT);
 
             let col_byte = x as usize / u8::BITS as usize;
             let col_bit = x as usize % u8::BITS as usize;
@@ -137,19 +169,19 @@ pub mod ls013b7dh03 {
         }
     }
 
-    impl<'a> Dimensions for DisplayFrame<'a> {
+    impl<'a> Dimensions for DisplayFrame<'a, BUF_SIZE> {
         fn bounding_box(&self) -> Rectangle {
             Rectangle {
                 top_left: Point { x: 0, y: 0 },
                 size: Size {
-                    width: DisplayFrame::WIDTH as u32,
-                    height: DisplayFrame::HEIGHT as u32,
+                    width: WIDTH as u32,
+                    height: HEIGHT as u32,
                 },
             }
         }
     }
 
-    impl<'a> DrawTarget for DisplayFrame<'a> {
+    impl<'a> DrawTarget for DisplayFrame<'a, BUF_SIZE> {
         type Color = BinaryColor;
         type Error = core::convert::Infallible;
 
@@ -163,10 +195,7 @@ pub mod ls013b7dh03 {
             for (x, y, is_pixel_on) in pixels
                 .into_iter()
                 .filter(|p| {
-                    p.0.x >= 0
-                        && p.0.x < Self::WIDTH as i32
-                        && p.0.y >= 0
-                        && p.0.y < Self::HEIGHT as i32
+                    p.0.x >= 0 && p.0.x < WIDTH as i32 && p.0.y >= 0 && p.0.y < HEIGHT as i32
                 })
                 .map(|p| (p.0.x as u8, p.0.y as u8, p.1.is_on()))
             {
@@ -177,8 +206,47 @@ pub mod ls013b7dh03 {
         }
 
         fn clear(&mut self, color: Self::Color) -> Result<(), Self::Error> {
-            self.reset(color.is_on());
+            self.init(color.is_on());
             Ok(())
+        }
+    }
+
+    /// Send frames to the LS013B7DH03 LCD
+    pub async fn lcd_task(
+        frames_in: DisplayFrameChReceiver,
+        frames_out: DisplayFrameChSender,
+        mut spi: Spi<'static, Usart0>,
+        mut cs: Pin<'D', 14, OutPp>,
+        _disp_com_inv: Pin<'D', 13, OutPp>,
+    ) {
+        defmt::info!("Started SPI task...");
+
+        // Clear display
+        let spi_ret = spi.transfer_async(&mut [], &[LcdMode::Clear as u8]).await;
+        assert!(spi_ret.is_ok());
+
+        loop {
+            let buffer = frames_in.receive().await;
+
+            // Assert CS
+            let _ = cs.set_high();
+
+            // Write update command
+            let spi_ret = spi.transfer_async(&mut [], &[LcdMode::Update as u8]).await;
+            assert!(spi_ret.is_ok());
+
+            // Write buffer
+            let spi_ret = spi.transfer_async(&mut [], buffer.as_bytes()).await;
+            assert!(spi_ret.is_ok());
+
+            // Write filler byte
+            let spi_ret = spi.transfer_async(&mut [], &[FILLER_BYTE]).await;
+            assert!(spi_ret.is_ok());
+
+            // Deassert CS
+            let _ = cs.set_low();
+
+            frames_out.send(buffer).await;
         }
     }
 }
