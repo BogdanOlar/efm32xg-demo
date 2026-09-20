@@ -33,8 +33,8 @@ const FILLER_BYTE: u8 = 0xFF;
 
 static mut BUFFER_0: UnsafeCell<[u8; BUF_SIZE]> = UnsafeCell::new([0; _]);
 static BUFFER_0_AVAILABLE: AtomicBool = AtomicBool::new(true);
-static mut BUFFER_1: UnsafeCell<[u8; BUF_SIZE]> = UnsafeCell::new([0; _]);
-static BUFFER_1_AVAILABLE: AtomicBool = AtomicBool::new(true);
+// static mut BUFFER_1: UnsafeCell<[u8; BUF_SIZE]> = UnsafeCell::new([0; _]);
+// static BUFFER_1_AVAILABLE: AtomicBool = AtomicBool::new(true);
 
 /// LCD Mode flags
 #[derive(Debug)]
@@ -44,35 +44,38 @@ enum LcdMode {
     Update = 0x80,
 }
 
-pub fn take_display_frames<'a>() -> [DisplayFrame<'a, BUF_SIZE>; 2] {
-    let b0 = if BUFFER_0_AVAILABLE.swap(false, Ordering::Relaxed) {
-        // SAFETY: available can only be true once on one thread,
-        // so there will only be at most one &mut reference
-        let buffer = unsafe { &mut *&raw mut BUFFER_0 };
-        buffer.get_mut()
-    } else {
-        panic!("attempted to reuse BUFFER_0");
-    };
-
-    let b1 = if BUFFER_1_AVAILABLE.swap(false, Ordering::Relaxed) {
-        // SAFETY: available can only be true once on one thread,
-        // so there will only be at most one &mut reference
-        let buffer = unsafe { &mut *&raw mut BUFFER_1 };
-        buffer.get_mut()
-    } else {
-        panic!("attempted to reuse BUFFER_1");
-    };
-
+/// Get all the statically allocated `DisplayFrame`s
+///
+/// # Panic
+///
+/// Panics if called twice
+pub fn take_display_frames<'a>() -> [DisplayFrame<'a, BUF_SIZE>; 1] {
     // Initialize the display buffers before returning
     [
-        DisplayFrame::new(b0).with_init(),
-        DisplayFrame::new(b1).with_init(),
+        DisplayFrame::new(if BUFFER_0_AVAILABLE.swap(false, Ordering::Relaxed) {
+            // SAFETY: available can only be true once on one thread,
+            // so there will only be at most one &mut reference
+            let buffer = unsafe { &mut *&raw mut BUFFER_0 };
+            buffer.get_mut()
+        } else {
+            panic!("attempted to reuse BUFFER_0");
+        })
+        .with_init(false),
+        // DisplayFrame::new(if BUFFER_1_AVAILABLE.swap(false, Ordering::Relaxed) {
+        //     // SAFETY: available can only be true once on one thread,
+        //     // so there will only be at most one &mut reference
+        //     let buffer = unsafe { &mut *&raw mut BUFFER_1 };
+        //     buffer.get_mut()
+        // } else {
+        //     panic!("attempted to reuse BUFFER_1");
+        // })
+        // .with_init(false),
     ]
 }
 
 impl<'a> DisplayFrame<'a, BUF_SIZE> {
     /// Initialize the display frame bytes
-    pub fn with_init(mut self) -> Self {
+    pub fn with_init(mut self, is_pixel_on: bool) -> Self {
         self.init(false);
         self
     }
