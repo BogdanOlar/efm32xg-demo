@@ -97,13 +97,6 @@ pub mod ls013b7dh03 {
             self
         }
 
-        /// Release the inner buffer reference
-        pub fn release(self) -> DisplayFrame<'a, BUF_SIZE> {
-            DisplayFrame {
-                buffer: self.buffer,
-            }
-        }
-
         /// Initialize the internal buffer:
         /// - Write the on-wire address for each line, so that we only calculate them once
         /// - Set all pixels to given state

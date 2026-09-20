@@ -92,6 +92,11 @@ async fn main(spawner: Spawner) {
     // Let this App take control of display (this is a `UG154: EFM32 Pearl Gecko Starter Kit` paticularity)
     let _ = gpio.pd15.into_mode::<OutPp>().set_high();
 
+    // Add `DisplayFrame`s to the display task queue
+    for f in display::ls013b7dh03::take_display_frames() {
+        FROM_SPI.sender().send(f).await;
+    }
+
     // ---- LED 0 and Button 0 Task ----
     spawner.spawn(
         button_led_task(
@@ -138,81 +143,10 @@ async fn main(spawner: Spawner) {
         .expect("Could not spawn SPI task"),
     );
 
-    defmt::info!("EFM32XG Demo started!");
-    defmt::info!("Press BTN0 (PF6) or BTN1 (PF7) to toggle LEDs");
-
     // ---- Display Task ----
-    {
-        let frames_in = FROM_SPI.receiver();
-        let frames_out = TO_SPI.sender();
-
-        for f in display::ls013b7dh03::take_display_frames() {
-            frames_out.send(f.release()).await;
-        }
-
-        // Create styles used by the drawing operations.
-        let thin_stroke = PrimitiveStyle::with_stroke(BinaryColor::On, 1);
-        let border_stroke = PrimitiveStyleBuilder::new()
-            .stroke_color(BinaryColor::On)
-            .stroke_width(3)
-            .stroke_alignment(StrokeAlignment::Inside)
-            .build();
-        let character_style = MonoTextStyle::new(&FONT_6X10, BinaryColor::Off);
-        let mut y_offset = 20;
-
-        let sec_duration: f32 = 1000.0;
-        let mut prev_frame_start = Instant::now();
-
-        loop {
-            let mut frame = frames_in.receive().await;
-            let frame_start = Instant::now();
-            let frame_duration = (frame_start - prev_frame_start).as_millis() as f32;
-            prev_frame_start = frame_start;
-
-            frame.clear(BinaryColor::Off);
-
-            // Draw a 3px wide outline around the display.
-            frame
-                .bounding_box()
-                .into_styled(border_stroke)
-                .draw(&mut frame);
-
-            // Draw a triangle.
-            Triangle::new(
-                Point::new(100, 16 + y_offset),
-                Point::new(100 + 16, 16 + y_offset),
-                Point::new(100 + 8, y_offset),
-            )
-            .into_styled(thin_stroke)
-            .draw(&mut frame);
-            y_offset = if y_offset <= -16 {
-                display::ls013b7dh03::HEIGHT as i32
-            } else {
-                y_offset - 1
-            };
-
-            // Draw FPS
-            let fps = if frame_duration.is_normal() {
-                sec_duration / frame_duration
-            } else {
-                0.0
-            };
-            if let Ok(fps_str) = format!(10; "{:.1} fps", fps) {
-                let fps_txt = Text::with_alignment(
-                    fps_str.as_str(),
-                    Point::new(0, 6),
-                    character_style,
-                    Alignment::Left,
-                );
-                frame.fill_solid(&fps_txt.bounding_box(), BinaryColor::On);
-                fps_txt.draw(&mut frame);
-            } else {
-                error!("Could not format fps {}", &fps);
-            }
-
-            frames_out.send(frame.release()).await;
-        }
-    }
+    spawner.spawn(
+        display_task(FROM_SPI.receiver(), TO_SPI.sender()).expect("Could not spawn Display task"),
+    );
 }
 
 #[task(pool_size = 2)]
@@ -221,7 +155,7 @@ async fn button_led_task(btn_id: ButtonId, mut btn: AsyncInputPin, mut led: Dyna
         // Wait for button press (active low)
         let _ = btn.wait_for_low().await;
         let _ = led.set_high();
-        defmt::info!("{} pressed - LED ON", &btn_id);
+        defmt::info!("{} pressed", &btn_id);
 
         // Small delay to debounce
         Timer::after_millis(50).await;
@@ -229,7 +163,7 @@ async fn button_led_task(btn_id: ButtonId, mut btn: AsyncInputPin, mut led: Dyna
         // Wait for button release
         let _ = btn.wait_for_high().await;
         let _ = led.set_low();
-        defmt::info!("{} released - LED OFF", &btn_id);
+        defmt::info!("{} released", &btn_id);
 
         // Small delay to debounce
         Timer::after_millis(50).await;
@@ -246,4 +180,72 @@ async fn lcd_task(
 ) {
     defmt::info!("Started SPI task...");
     display::ls013b7dh03::lcd_task(frames_in, frames_out, spi, cs, disp_com_inv).await;
+}
+
+#[task]
+async fn display_task(frames_in: DisplayFrameChReceiver, frames_out: DisplayFrameChSender) {
+    defmt::info!("Started Display task...");
+
+    // Create styles used by the drawing operations.
+    let thin_stroke = PrimitiveStyle::with_stroke(BinaryColor::On, 1);
+    let border_stroke = PrimitiveStyleBuilder::new()
+        .stroke_color(BinaryColor::On)
+        .stroke_width(3)
+        .stroke_alignment(StrokeAlignment::Inside)
+        .build();
+    let character_style = MonoTextStyle::new(&FONT_6X10, BinaryColor::Off);
+    let mut y_offset = 20;
+
+    let sec_duration: f32 = 1000.0;
+    let mut prev_frame_start = Instant::now();
+
+    loop {
+        let mut frame = frames_in.receive().await;
+        let frame_start = Instant::now();
+        let frame_duration = (frame_start - prev_frame_start).as_millis() as f32;
+        prev_frame_start = frame_start;
+
+        frame.clear(BinaryColor::Off);
+
+        // Draw a 3px wide outline around the display.
+        frame
+            .bounding_box()
+            .into_styled(border_stroke)
+            .draw(&mut frame);
+
+        // Draw a triangle.
+        Triangle::new(
+            Point::new(100, 16 + y_offset),
+            Point::new(100 + 16, 16 + y_offset),
+            Point::new(100 + 8, y_offset),
+        )
+        .into_styled(thin_stroke)
+        .draw(&mut frame);
+        y_offset = if y_offset <= -16 {
+            display::ls013b7dh03::HEIGHT as i32
+        } else {
+            y_offset - 1
+        };
+
+        // Draw FPS
+        let fps = if frame_duration.is_normal() {
+            sec_duration / frame_duration
+        } else {
+            0.0
+        };
+        if let Ok(fps_str) = format!(10; "{:.1} fps", fps) {
+            let fps_txt = Text::with_alignment(
+                fps_str.as_str(),
+                Point::new(0, 6),
+                character_style,
+                Alignment::Left,
+            );
+            frame.fill_solid(&fps_txt.bounding_box(), BinaryColor::On);
+            fps_txt.draw(&mut frame);
+        } else {
+            error!("Could not format fps {}", &fps);
+        }
+
+        frames_out.send(frame).await;
+    }
 }
