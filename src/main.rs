@@ -174,6 +174,5 @@ async fn lcd_task(
 #[task]
 async fn display_task(frames_in: DisplayFrameChReceiver, frames_out: DisplayFrameChSender) {
     defmt::info!("Started Display task...");
-
     display::display_task(frames_in, frames_out).await;
 }

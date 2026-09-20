@@ -1,3 +1,5 @@
+//! LS013B7DH03 display
+
 use crate::{display::DisplayFrame, DisplayFrameChReceiver, DisplayFrameChSender};
 use core::{
     cell::UnsafeCell,
@@ -36,47 +38,10 @@ static BUFFER_0_AVAILABLE: AtomicBool = AtomicBool::new(true);
 // static mut BUFFER_1: UnsafeCell<[u8; BUF_SIZE]> = UnsafeCell::new([0; _]);
 // static BUFFER_1_AVAILABLE: AtomicBool = AtomicBool::new(true);
 
-/// LCD Mode flags
-#[derive(Debug)]
-#[repr(u8)]
-enum LcdMode {
-    Clear = 0x20,
-    Update = 0x80,
-}
-
-/// Get all the statically allocated `DisplayFrame`s
-///
-/// # Panic
-///
-/// Panics if called twice
-pub fn take_display_frames<'a>() -> [DisplayFrame<'a, BUF_SIZE>; 1] {
-    // Initialize the display buffers before returning
-    [
-        DisplayFrame::new(if BUFFER_0_AVAILABLE.swap(false, Ordering::Relaxed) {
-            // SAFETY: available can only be true once on one thread,
-            // so there will only be at most one &mut reference
-            let buffer = unsafe { &mut *&raw mut BUFFER_0 };
-            buffer.get_mut()
-        } else {
-            panic!("attempted to reuse BUFFER_0");
-        })
-        .with_init(false),
-        // DisplayFrame::new(if BUFFER_1_AVAILABLE.swap(false, Ordering::Relaxed) {
-        //     // SAFETY: available can only be true once on one thread,
-        //     // so there will only be at most one &mut reference
-        //     let buffer = unsafe { &mut *&raw mut BUFFER_1 };
-        //     buffer.get_mut()
-        // } else {
-        //     panic!("attempted to reuse BUFFER_1");
-        // })
-        // .with_init(false),
-    ]
-}
-
 impl<'a> DisplayFrame<'a, BUF_SIZE> {
     /// Initialize the display frame bytes
     pub fn with_init(mut self, is_pixel_on: bool) -> Self {
-        self.init(false);
+        self.init(is_pixel_on);
         self
     }
 
@@ -105,22 +70,28 @@ impl<'a> DisplayFrame<'a, BUF_SIZE> {
 
     /// Get the buffer index corresponding to a pixel coord, and its bitmask which shows which bit in the byte
     /// represents the pixel.
-    fn get_pixel_addr_unchecked(&self, x: u8, y: u8) -> (usize, u8) {
-        assert!((x as usize) < WIDTH);
-        assert!((y as usize) < HEIGHT);
+    #[inline(always)]
+    fn get_pixel_addr_unchecked(&self, x: u8, y: u8) -> PAddr {
+        let x = x as usize;
+        let y = y as usize;
+        assert!(x < WIDTH);
+        assert!(y < HEIGHT);
 
-        let col_byte = x as usize / u8::BITS as usize;
-        let col_bit = x as usize % u8::BITS as usize;
-        let index = (y as usize * LINE_TOTAL_BYTE_COUNT) + (LINE_ADDRESS_BYTE_COUNT + col_byte);
+        let col_byte = x / u8::BITS as usize;
+        let col_bit = x % u8::BITS as usize;
+        let index = (y * LINE_TOTAL_BYTE_COUNT) + (LINE_ADDRESS_BYTE_COUNT + col_byte);
 
-        // Pixel bits must be transmitted over SPI in reverse order,
-        // so that's also their order in each byte of the buffer
-        (index, 0x80 >> col_bit)
+        PAddr(
+            index,
+            // Pixel bits must be transmitted over SPI in reverse order,
+            // so that's also their order in each byte of the buffer
+            0x80 >> col_bit,
+        )
     }
 
     /// Set the state of a pixel at the given coordinates
-    fn write(&mut self, x: u8, y: u8, is_pixel_on: bool) {
-        let (index, bit_mask) = self.get_pixel_addr_unchecked(x, y);
+    fn write_unchecked(&mut self, x: u8, y: u8, is_pixel_on: bool) {
+        let PAddr(index, bit_mask) = self.get_pixel_addr_unchecked(x, y);
 
         if ((self.buffer[index] & bit_mask) == 0) ^ is_pixel_on {
             // flip the pixel state
@@ -129,21 +100,28 @@ impl<'a> DisplayFrame<'a, BUF_SIZE> {
     }
 
     /// Read the state of a pixel at the given coordiantes
-    fn read(&self, x: u8, y: u8) -> bool {
-        let (index, bit_mask) = self.get_pixel_addr_unchecked(x, y);
+    #[allow(dead_code)]
+    fn read_unchecked(&self, x: u8, y: u8) -> bool {
+        let PAddr(index, bit_mask) = self.get_pixel_addr_unchecked(x, y);
 
         (self.buffer[index] & bit_mask) == 0
     }
 
     /// Invert the state of a pixel at the given coordinates, and return current state
-    fn flip(&mut self, x: u8, y: u8) -> bool {
-        let (index, bit_mask) = self.get_pixel_addr_unchecked(x, y);
+    #[allow(dead_code)]
+    fn flip_unchecked(&mut self, x: u8, y: u8) -> bool {
+        let PAddr(index, bit_mask) = self.get_pixel_addr_unchecked(x, y);
 
         self.buffer[index] ^= bit_mask;
 
         (self.buffer[index] & bit_mask) == 0
     }
 }
+
+/// Pixel address in the undelying `u8` buffer of the [`DisplayFrame`]
+///
+/// (index, bit_mask)
+struct PAddr(usize, u8);
 
 impl<'a> Dimensions for DisplayFrame<'a, BUF_SIZE> {
     fn bounding_box(&self) -> Rectangle {
@@ -174,8 +152,7 @@ impl<'a> DrawTarget for DisplayFrame<'a, BUF_SIZE> {
         for Pixel(coord, color) in pixels.into_iter().filter(|Pixel(coord, _)| {
             coord.x >= 0 && coord.x < I_WIDTH && coord.y >= 0 && coord.y < I_HEIGHT
         }) {
-            self.write(coord.x as u8, coord.y as u8, color.is_on());
-            // self.flip(coord.x as u8, coord.y as u8);
+            self.write_unchecked(coord.x as u8, coord.y as u8, color.is_on());
         }
 
         Ok(())
@@ -195,6 +172,13 @@ pub async fn lcd_task(
     mut cs: Pin<'D', 14, OutPp>,
     _disp_com_inv: Pin<'D', 13, OutPp>,
 ) {
+    /// LCD Mode flags
+    #[repr(u8)]
+    enum LcdMode {
+        Clear = 0x20,
+        Update = 0x80,
+    }
+
     // Clear display
     let spi_ret = spi.transfer_async(&mut [], &[LcdMode::Clear as u8]).await;
     assert!(spi_ret.is_ok());
@@ -222,4 +206,33 @@ pub async fn lcd_task(
 
         frames_out.send(buffer).await;
     }
+}
+
+/// Get all the statically allocated `DisplayFrame`s
+///
+/// # Panic
+///
+/// Panics if called twice
+pub fn take_display_frames<'a>() -> [DisplayFrame<'a, BUF_SIZE>; 1] {
+    // Initialize the display buffers before returning
+    [
+        DisplayFrame::new(if BUFFER_0_AVAILABLE.swap(false, Ordering::Relaxed) {
+            // SAFETY: available can only be true once on one thread,
+            // so there will only be at most one &mut reference
+            let buffer = unsafe { &mut *&raw mut BUFFER_0 };
+            buffer.get_mut()
+        } else {
+            panic!("attempted to reuse BUFFER_0");
+        })
+        .with_init(false),
+        // DisplayFrame::new(if BUFFER_1_AVAILABLE.swap(false, Ordering::Relaxed) {
+        //     // SAFETY: available can only be true once on one thread,
+        //     // so there will only be at most one &mut reference
+        //     let buffer = unsafe { &mut *&raw mut BUFFER_1 };
+        //     buffer.get_mut()
+        // } else {
+        //     panic!("attempted to reuse BUFFER_1");
+        // })
+        // .with_init(false),
+    ]
 }

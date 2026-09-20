@@ -35,8 +35,6 @@ impl<'a, const N: usize> DisplayFrame<'a, N> {
 }
 
 pub async fn display_task(frames_in: DisplayFrameChReceiver, frames_out: DisplayFrameChSender) {
-    defmt::info!("Started Display task...");
-
     // Create styles used by the drawing operations.
     let thin_stroke = PrimitiveStyle::with_stroke(BinaryColor::On, 1);
     let border_stroke = PrimitiveStyleBuilder::new()
@@ -51,13 +49,13 @@ pub async fn display_task(frames_in: DisplayFrameChReceiver, frames_out: Display
         .build();
     let mut y_offset = 20;
 
-    let sec_duration: f32 = 1000.0;
+    let sec_us: f32 = 1000000.0;
     let mut prev_frame_start = Instant::now();
 
     loop {
         let mut frame = frames_in.receive().await;
         let frame_start = Instant::now();
-        let frame_duration = (frame_start - prev_frame_start).as_millis() as f32;
+        let frame_us = (frame_start - prev_frame_start).as_micros() as f32;
         prev_frame_start = frame_start;
 
         frame.clear(BinaryColor::Off);
@@ -82,12 +80,13 @@ pub async fn display_task(frames_in: DisplayFrameChReceiver, frames_out: Display
             y_offset - 1
         };
 
-        // Draw FPS
-        let fps = if frame_duration.is_normal() {
-            sec_duration / frame_duration
+        // FPS
+        let fps = if frame_us.is_normal() {
+            sec_us / frame_us
         } else {
             0.0
         };
+
         if let Ok(fps_str) = format!(10; "{:.1} fps", fps) {
             let fps_txt = Text::with_text_style(
                 fps_str.as_str(),
