@@ -54,7 +54,9 @@ impl<'a> DisplayFrame<'a, BUF_SIZE> {
         // Write addresses and filler bytes to buffer
         for (addr, sl) in self
             .buffer
-            .chunks_exact_mut(LINE_TOTAL_BYTE_COUNT)
+            .as_chunks_mut::<LINE_TOTAL_BYTE_COUNT>()
+            .0
+            .iter_mut()
             .enumerate()
         {
             // LCD address space starts at 1 for y
@@ -216,8 +218,7 @@ pub fn take_display_frames<'a>() -> [DisplayFrame<'a, BUF_SIZE>; 1] {
         DisplayFrame::new(if BUFFER_0_AVAILABLE.swap(false, Ordering::Relaxed) {
             // SAFETY: available can only be true once on one thread,
             // so there will only be at most one &mut reference
-            let buffer = unsafe { &mut *&raw mut BUFFER_0 };
-            buffer.get_mut()
+            unsafe { &mut *&raw mut BUFFER_0 }.get_mut()
         } else {
             panic!("attempted to reuse BUFFER_0");
         })
@@ -225,8 +226,7 @@ pub fn take_display_frames<'a>() -> [DisplayFrame<'a, BUF_SIZE>; 1] {
         // DisplayFrame::new(if BUFFER_1_AVAILABLE.swap(false, Ordering::Relaxed) {
         //     // SAFETY: available can only be true once on one thread,
         //     // so there will only be at most one &mut reference
-        //     let buffer = unsafe { &mut *&raw mut BUFFER_1 };
-        //     buffer.get_mut()
+        //     unsafe { &mut *&raw mut BUFFER_1 }.get_mut()
         // } else {
         //     panic!("attempted to reuse BUFFER_1");
         // })
