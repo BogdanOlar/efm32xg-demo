@@ -212,24 +212,28 @@ pub async fn lcd_task(
 /// # Panic
 ///
 /// Panics if called twice
+#[allow(static_mut_refs)]
 pub fn take_display_frames<'a>() -> [DisplayFrame<'a, BUF_SIZE>; 1] {
-    // Initialize the display buffers before returning
     [
-        DisplayFrame::new(if BUFFER_0_AVAILABLE.swap(false, Ordering::Relaxed) {
-            // SAFETY: available can only be true once on one thread,
-            // so there will only be at most one &mut reference
-            unsafe { &mut *&raw mut BUFFER_0 }.get_mut()
+        if BUFFER_0_AVAILABLE.swap(false, Ordering::Relaxed) {
+            DisplayFrame::new(
+                // SAFETY: available can only be true once on one thread,
+                // so there will only be at most one &mut reference
+                unsafe { &mut *BUFFER_0.get() },
+            )
+            .with_init(false)
         } else {
             panic!("attempted to reuse BUFFER_0");
-        })
-        .with_init(false),
-        // DisplayFrame::new(if BUFFER_1_AVAILABLE.swap(false, Ordering::Relaxed) {
-        //     // SAFETY: available can only be true once on one thread,
-        //     // so there will only be at most one &mut reference
-        //     unsafe { &mut *&raw mut BUFFER_1 }.get_mut()
+        },
+        // if BUFFER_1_AVAILABLE.swap(false, Ordering::Relaxed) {
+        //     DisplayFrame::new(
+        //         // SAFETY: available can only be true once on one thread,
+        //         // so there will only be at most one &mut reference
+        //         unsafe { &mut *BUFFER_1.get() },
+        //     )
+        //     .with_init(false)
         // } else {
         //     panic!("attempted to reuse BUFFER_1");
-        // })
-        // .with_init(false),
+        // },
     ]
 }
