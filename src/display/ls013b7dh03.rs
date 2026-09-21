@@ -180,8 +180,10 @@ pub async fn lcd_task(
     }
 
     // Clear display
+    let _ = cs.set_high();
     let spi_ret = spi.transfer_async(&mut [], &[LcdMode::Clear as u8]).await;
     assert!(spi_ret.is_ok());
+    let _ = cs.set_low();
 
     loop {
         let frame = frames_in.receive().await;
